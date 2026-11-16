@@ -1,17 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Move it here at the top level
+  allowedDevOrigins: ["192.168.100.16", "*.local-origin.dev"], // replace with your actual origins
+
   experimental: {
-    agentFeedback: true,
-  },
-  turbopack: {
-    rules: {
-      "*.css": {
-        loaders: ["@tailwindcss/turbopack"],
-        as: "*.css",
-      },
-    },
+    // Keep any other experimental flags here, or remove the experimental block if it's now empty
   },
 };
 

@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import emailjs from '@emailjs/browser';
-import { SERVICES, TIME_SLOTS, formatKES } from '@/lib/data';
+import { SERVICES as DEFAULT_SERVICES, TIME_SLOTS, formatKES } from '@/lib/data';
+import { supabase } from '@/lib/supabase';
 
 async function uploadToCloudinary(file) {
   if (!file) return 'No reference image attached';
@@ -10,38 +11,78 @@ async function uploadToCloudinary(file) {
   const cloudName = process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME;
   const preset = process.env.NEXT_PUBLIC_CLOUDINARY_UPLOAD_PRESET;
 
+  if (!cloudName || !preset) {
+    throw new Error('Cloudinary environment variables are missing.');
+  }
+
   const formData = new FormData();
   formData.append('file', file);
   formData.append('upload_preset', preset);
 
-  try {
-    const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
-      method: 'POST',
-      body: formData,
-    });
-    const data = await res.json();
-    return data.secure_url || 'Upload failed';
-  } catch (err) {
-    console.error('Cloudinary upload error:', err);
-    return 'Image upload failed';
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  const data = await res.json();
+  
+  if (!res.ok) {
+    throw new Error(data.error?.message || 'Cloudinary upload failed');
   }
+
+  return data.secure_url;
 }
 
 export default function BookingForm() {
   const [fullName, setFullName] = useState('');
   const [phone, setPhone] = useState('');
-  const [selected, setSelected] = useState([]); // Array of service ids
+  const [selected, setSelected] = useState([]); // Array of service IDs
+  const [availableServices, setAvailableServices] = useState(DEFAULT_SERVICES); // Initialized with defaults
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState('');
   const [date, setDate] = useState('');
   const [time, setTime] = useState('');
+  const [bookedSlots, setBookedSlots] = useState([]); // Taken times from database
   const [submitting, setSubmitting] = useState(false);
   const [modal, setModal] = useState(null);
 
-  // Filter selected services and compute total
+  // Fetch live services from Supabase and merge them intelligently with defaults
+  useEffect(() => {
+    async function fetchServices() {
+      const { data, error } = await supabase.from('services').select('*').order('name');
+
+      if (!error && data && data.length > 0) {
+        const normalizedSupabaseServices = data.map(s => ({
+          ...s,
+          image_url: s.image_url || s.image || s.imageUrl || ''
+        }));
+
+        const dbMap = new Map(
+          normalizedSupabaseServices.map(s => [s.name.trim().toLowerCase(), s])
+        );
+
+        const merged = DEFAULT_SERVICES.map(def => {
+          const key = def.name.trim().toLowerCase();
+          if (dbMap.has(key)) {
+            const match = dbMap.get(key);
+            dbMap.delete(key);
+            return match;
+          }
+          return def;
+        });
+
+        const extraSupabaseServices = Array.from(dbMap.values());
+        setAvailableServices([...merged, ...extraSupabaseServices]);
+      } else {
+        setAvailableServices(DEFAULT_SERVICES);
+      }
+    }
+    fetchServices();
+  }, []);
+
   const chosen = useMemo(() => {
-    return SERVICES.filter((s) => selected.includes(s.id));
-  }, [selected]);
+    return availableServices.filter((s) => selected.includes(s.id));
+  }, [selected, availableServices]);
 
   const total = useMemo(() => {
     return chosen.reduce((sum, s) => sum + (Number(s.price) || 0), 0);
@@ -49,7 +90,26 @@ export default function BookingForm() {
 
   const today = new Date().toISOString().split('T')[0];
 
-  // Preview URL lifecycle
+  useEffect(() => {
+    if (!date) {
+      setBookedSlots([]);
+      return;
+    }
+
+    async function fetchBookedTimes() {
+      const { data, error } = await supabase
+        .from('bookings')
+        .select('booking_time')
+        .eq('booking_date', date);
+
+      if (!error && data) {
+        setBookedSlots(data.map((item) => item.booking_time));
+      }
+    }
+
+    fetchBookedTimes();
+  }, [date]);
+
   useEffect(() => {
     if (!file) {
       setPreview('');
@@ -73,6 +133,7 @@ export default function BookingForm() {
     setFile(null);
     setDate('');
     setTime('');
+    setBookedSlots([]);
   };
 
   const closeModal = () => {
@@ -88,7 +149,6 @@ export default function BookingForm() {
       return;
     }
 
-    // Validate Phone Number (Kenyan format check)
     const phoneRegex = /^(?:\+?254|0)?([17]\d{8})$/;
     if (!phoneRegex.test(phone.replace(/\s+/g, ''))) {
       alert('Please enter a valid Kenyan phone number (e.g., 0712 345 678).');
@@ -97,8 +157,45 @@ export default function BookingForm() {
 
     setSubmitting(true);
 
-    const imageUrl = await uploadToCloudinary(file);
+    let imageUrl;
+    try {
+      imageUrl = await uploadToCloudinary(file);
+    } catch (uploadErr) {
+      console.error('Upload error:', uploadErr);
+      alert(`Image upload failed: ${uploadErr.message}`);
+      setSubmitting(false);
+      return;
+    }
+
     const servicesText = chosen.map((s) => `${s.name} (${formatKES(s.price)})`);
+
+    const { error: dbError } = await supabase.from('bookings').insert([
+      {
+        full_name: fullName.trim(),
+        phone: phone.trim(),
+        booking_date: date,
+        booking_time: time,
+        services: servicesText.join(', '),
+        total_price: formatKES(total),
+        image_url: imageUrl,
+      },
+    ]);
+
+    if (dbError) {
+      setSubmitting(false);
+      if (dbError.code === '23505') {
+        alert('⚠️ Sorry, this time slot was just booked by someone else! Please pick another time.');
+        const { data } = await supabase
+          .from('bookings')
+          .select('booking_time')
+          .eq('booking_date', date);
+        if (data) setBookedSlots(data.map((item) => item.booking_time));
+        setTime('');
+      } else {
+        alert('Database error: ' + dbError.message);
+      }
+      return;
+    }
 
     const details = {
       fullName: fullName.trim(),
@@ -121,7 +218,6 @@ export default function BookingForm() {
     };
 
     try {
-      // 1. Send Email via EmailJS
       await emailjs.send(
         process.env.NEXT_PUBLIC_EMAILJS_SERVICE_ID,
         process.env.NEXT_PUBLIC_EMAILJS_TEMPLATE_ID,
@@ -130,24 +226,10 @@ export default function BookingForm() {
       );
     } catch (err) {
       console.error('EmailJS failed:', err);
-      alert('Booking recorded, but email dispatch failed. Please contact Joseph directly.');
+      alert('Booking saved to database, but email dispatch failed. Please contact Joseph directly.');
     } finally {
       setSubmitting(false);
       setModal(details);
-
-      // 2. Trigger WhatsApp Dispatch automatically
-      const whatsappMessage = encodeURIComponent(
-        `*New Booking Request - Glow & Grace Nails* ✨\n\n` +
-        `👤 *Client:* ${details.fullName}\n` +
-        `📞 *Phone:* ${details.phone}\n` +
-        `📅 *Date:* ${details.date} at ${details.time}\n` +
-        `💅 *Services:* ${servicesText.join(', ')}\n` +
-        `💰 *Total:* ${details.total}\n` +
-        `${imageUrl.startsWith('http') ? `🖼️ *Reference Image:* ${imageUrl}` : ''}`
-      );
-
-      const businessWhatsAppNumber = '254704954127'; // Replace with your active business WhatsApp number
-      window.open(`https://wa.me/${businessWhatsAppNumber}?text=${whatsappMessage}`, '_blank');
     }
   }
 
@@ -184,28 +266,47 @@ export default function BookingForm() {
 
         <fieldset className="form-section">
           <legend>2. Choose Services</legend>
-          <div className="services-grid">
-            {SERVICES.map((s) => {
-              const isChecked = selected.includes(s.id);
-              return (
-                <div
-                  key={s.id}
-                  className={`services-card ${isChecked ? 'selected' : ''}`}
-                  onClick={() => toggleService(s.id)}
-                  style={{ cursor: 'pointer' }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={() => {}} // Handled by parent div click
-                  />
-                  <div className="card-content">
-                    <span className="title">{s.name}</span>
-                    <span className="price">{formatKES(s.price)}</span>
+          {/* Services Selection Grid without Images */}
+          <div className="services-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '15px' }}>
+            {availableServices.length === 0 ? (
+              <p style={{ color: '#666', fontStyle: 'italic', gridColumn: '1 / -1' }}>Loading available services...</p>
+            ) : (
+              availableServices.map((s) => {
+                const isChecked = selected.includes(s.id);
+                return (
+                  <div
+                    key={s.id}
+                    className={`services-card ${isChecked ? 'selected' : ''}`}
+                    onClick={() => toggleService(s.id)}
+                    style={{
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '12px',
+                      background: '#fff',
+                      borderRadius: '10px',
+                      padding: '15px',
+                      border: isChecked ? '2px solid var(--primary-color, #d63384)' : '1px solid #eaeaea',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+                      transition: 'all 0.2s ease-in-out',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onChange={() => {}}
+                      style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                    />
+                    <div className="card-content" style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span className="title" style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#222' }}>{s.name}</span>
+                      <span className="price" style={{ color: 'var(--primary-color, #d63384)', fontWeight: '600', fontSize: '0.9rem' }}>
+                        {formatKES(s.price)}
+                      </span>
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })
+            )}
           </div>
         </fieldset>
 
@@ -251,11 +352,14 @@ export default function BookingForm() {
                 onChange={(e) => setTime(e.target.value)}
               >
                 <option value="">Select a time slot</option>
-                {TIME_SLOTS.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
+                {TIME_SLOTS.map((t) => {
+                  const isBooked = bookedSlots.includes(t);
+                  return (
+                    <option key={t} value={t} disabled={isBooked}>
+                      {t} {isBooked ? '(Booked)' : ''}
+                    </option>
+                  );
+                })}
               </select>
             </div>
           </div>
@@ -291,7 +395,7 @@ export default function BookingForm() {
                 ))}
               </ul>
               <p><strong>Total Estimated:</strong> {modal.total}</p>
-              {modal.imageUrl.startsWith('http') && (
+              {modal.imageUrl && modal.imageUrl.startsWith('http') && (
                 <p>
                   <strong>Inspiration Image:</strong>{' '}
                   <a
@@ -305,7 +409,36 @@ export default function BookingForm() {
                 </p>
               )}
             </div>
-            <button onClick={closeModal} className="btn-close">Close</button>
+
+            {/* Direct WhatsApp Action Button */}
+            <div style={{ display: 'flex', gap: '10px', marginTop: '1rem' }}>
+              <a
+                href={`https://wa.me/254704954127?text=${encodeURIComponent(
+                  `*New Booking Request - Glow & Grace Nails* ✨\n\n` +
+                  `👤 *Client:* ${modal.fullName}\n` +
+                  `📞 *Phone:* ${modal.phone}\n` +
+                  `📅 *Date:* ${modal.date} at ${modal.time}\n` +
+                  `💅 *Services:* ${modal.services.join(', ')}\n` +
+                  `💰 *Total:* ${modal.total}\n` +
+                  `${modal.imageUrl && modal.imageUrl.startsWith('http') ? `🖼️ *Reference Image:* ${modal.imageUrl}` : ''}`
+                )}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{
+                  flex: 1,
+                  background: '#25D366',
+                  color: '#fff',
+                  padding: '10px',
+                  borderRadius: '6px',
+                  textAlign: 'center',
+                  textDecoration: 'none',
+                  fontWeight: 'bold',
+                }}
+              >
+                Open WhatsApp Chat
+              </a>
+              <button onClick={closeModal} className="btn-close" style={{ flex: 1 }}>Close</button>
+            </div>
           </div>
         </div>
       )}

@@ -1,9 +1,41 @@
+'use client';
+
+import { useEffect, useState } from 'react';
 import Navbar from '@/components/Navbar';
 import BookingForm from '@/components/BookingForm';
 import Footer from '@/components/Footer';
-import { GALLERY, MENU, LOGO_IMG, WHATSAPP_URL, formatKES } from '@/lib/data';
+import { SERVICES as DEFAULT_SERVICES, GALLERY as DEFAULT_GALLERY, MENU, LOGO_IMG, WHATSAPP_URL, formatKES } from '@/lib/data';
+import { supabase } from '@/lib/supabase';
 
 export default function Home() {
+  const [galleryItems, setGalleryItems] = useState(DEFAULT_GALLERY);
+
+  // Fetch live services from Supabase and merge them with hardcoded GALLERY items
+  useEffect(() => {
+    async function fetchGalleryData() {
+      const { data, error } = await supabase.from('services').select('*').order('name');
+
+      if (!error && data && data.length > 0) {
+        // Normalize Supabase records into gallery card format ({ src, alt, label })
+        const supabaseCards = data.map(s => {
+          const imgUrl = s.image_url || s.image || s.imageUrl || '';
+          return {
+            src: imgUrl,
+            alt: s.name,
+            label: `${s.name} - ${formatKES(s.price)}`
+          };
+        }).filter(item => item.src); // Only include items that actually have an image URL
+
+        // Combine hardcoded default gallery items with live database uploads
+        setGalleryItems([...DEFAULT_GALLERY, ...supabaseCards]);
+      } else {
+        setGalleryItems(DEFAULT_GALLERY);
+      }
+    }
+
+    fetchGalleryData();
+  }, []);
+
   return (
     <>
       <Navbar />
@@ -26,7 +58,7 @@ export default function Home() {
           </div>
           <div className="about-text">
             <span className="badge">Meet your Technician</span>
-            <h2>Hi, I&apos;m Joseph 👋</h2>
+            <h2>Hi, Im Joseph </h2>
             <p>
               With over 3 years of certified nail tech experience, I specialize in non-damaging gel
               manicures, structural acrylic build-ups, and hand-painted nail art. My focus is on nail
@@ -41,21 +73,23 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Gallery Section retaining hardcoded and live Supabase items */}
       <section id="gallery" className="gallery-section">
         <div className="section-header">
           <h2>Recent Client Creation</h2>
           <p>Take a look at some of our signature looks before selecting your appointment option below.</p>
         </div>
         <div className="gallery-grid">
-          {GALLERY.map((g, i) => (
+          {galleryItems.map((g, i) => (
             <div className="gallery-card" key={i}>
-              <img src={g.src} alt={g.alt} />
+              <img src={g.src} alt={g.alt || 'Nail Art Creation'} />
               <div className="gallery-overlay"><span>{g.label}</span></div>
             </div>
           ))}
         </div>
       </section>
 
+      {/* Services & Rate Menu Section */}
       <section id="services-pricing" className="pricing-menu-section">
         <div className="section-header">
           <h2>Services &amp; Rate Menu</h2>
@@ -75,6 +109,7 @@ export default function Home() {
         </div>
       </section>
 
+      {/* Booking Section */}
       <section id="booking" className="booking-section">
         <div className="booking-container">
           <div className="section-header">

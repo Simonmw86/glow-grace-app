@@ -224,7 +224,7 @@ section {
   max-width: 380px;
   height: 380px;
   object-fit: cover;
-  border-radius: 20px;
+  border-radius: 30px;
   box-shadow: var(--shadow);
 }
 
@@ -611,8 +611,11 @@ section {
 
   #hero,
   .hero-section {
-    padding: 5rem 5%;
+    padding: 3rem 1.5rem;
+    min-height: auto;
+    height: auto;
     text-align: center;
+    justify-content: center;
   }
 
   #hero h1,
